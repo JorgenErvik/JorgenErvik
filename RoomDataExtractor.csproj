@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+  <AddIn Type="DBApplication">
+    <Name>RoomDataExtractor</Name>
+    <Assembly>RoomDataExtractor.dll</Assembly>
+    <AddInId>A1B2C3D4-E5F6-7890-ABCD-EF1234567890</AddInId>
+    <FullClassName>RoomDataExtractor.ExtractRoomsApp</FullClassName>
+    <VendorId>AFRY_FEF</VendorId>
+    <VendorDescription>AFRY FEF Arealmodell Room Extractor</VendorDescription>
+  </AddIn>
+</RevitAddIns>

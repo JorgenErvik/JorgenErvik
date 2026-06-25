@@ -1,0 +1,289 @@
+"""
+Kjør DA4R-ekstraksjon for én eller flere Revit-modeller.
+
+Brukes internt av app.py, men kan også kjøres direkte:
+  py da4r/run_extraction.py
+
+Forutsetning: setup_da4r.py må ha blitt kjørt én gang.
+"""
+
+import base64
+import json
+import os
+import sys
+import time
+import requests
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from config import APS_CLIENT_ID, APS_CLIENT_SECRET
+
+BASE_URL    = "https://developer.api.autodesk.com"
+DA_URL      = f"{BASE_URL}/da/us-east/v3"
+NICKNAME    = "FEF_AFRY"
+ACTIVITY_ID = f"{NICKNAME}.ExtractRooms+prod"
+POLL_EVERY  = 10    # sekunder
+MAX_WAIT    = 900   # 15 minutter maks per modell
+
+
+# ---------------------------------------------------------------------------
+# Token (code:all for DA4R)
+# ---------------------------------------------------------------------------
+
+_da_token = None
+_da_token_expires = 0
+
+
+def get_da_token() -> str:
+    global _da_token, _da_token_expires
+    now = time.time()
+    if _da_token and now < _da_token_expires - 60:
+        return _da_token
+    resp = requests.post(
+        f"{BASE_URL}/authentication/v2/token",
+        data={
+            "client_id": APS_CLIENT_ID,
+            "client_secret": APS_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+            "scope": "code:all data:read",
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    _da_token = data["access_token"]
+    _da_token_expires = now + data.get("expires_in", 3600)
+    return _da_token
+
+
+def dah(token):
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+# ---------------------------------------------------------------------------
+# Hjelpefunksjoner
+# ---------------------------------------------------------------------------
+
+def get_signed_download_url(token: str, project_id: str, item_id: str) -> str:
+    """Hent siste versjon av en Revit-fil og generer en signert nedlastings-URL."""
+    versions_resp = requests.get(
+        f"{BASE_URL}/data/v1/projects/{project_id}/items/{item_id}/versions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    versions_resp.raise_for_status()
+    versions = versions_resp.json()["data"]
+    if not versions:
+        raise ValueError(f"Ingen versjoner funnet for item {item_id}")
+
+    latest = versions[0]
+    storage = latest.get("relationships", {}).get("storage", {}).get("data", {})
+    storage_id = storage.get("id", "")
+
+    if not storage_id:
+        raise ValueError(f"Ingen storage-ID for item {item_id}")
+
+    # Oversett APS storage URN til en signert URL via OSS
+    # Format: urn:adsk.objects:os.object:<bucket>/<objectkey>
+    parts = storage_id.replace("urn:adsk.objects:os.object:", "").split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Ugyldig storage URN: {storage_id}")
+    bucket_key, object_name = parts[0], parts[1]
+
+    sign_resp = requests.post(
+        f"{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_name}/signeds3download",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"minutesExpiration": 60},
+    )
+    sign_resp.raise_for_status()
+    return sign_resp.json()["url"]
+
+
+def submit_workitem(token: str, download_url: str, model_name: str) -> str:
+    """Send inn et DA4R WorkItem og returner workitem-ID."""
+    payload = {
+        "activityId": ACTIVITY_ID,
+        "arguments": {
+            "rvtFile": {
+                "url": download_url,
+                "verb": "get",
+            },
+            "result": {
+                "verb": "put",
+                "url": "data:application/json,{}",  # placeholder — vi bruker report i stedet
+            },
+        },
+    }
+
+    # Opprett en OSS-bucket for output hvis nødvendig, eller bruk DA4R report
+    resp = requests.post(f"{DA_URL}/workitems", headers=dah(token), json=payload)
+    resp.raise_for_status()
+    wi = resp.json()
+    wi_id = wi["id"]
+    print(f"  WorkItem sendt: {wi_id}")
+    return wi_id
+
+
+def submit_workitem_with_output(token: str, download_url: str, output_url: str) -> str:
+    """Send inn WorkItem med eksplisitt output-URL (signert S3 PUT-URL)."""
+    payload = {
+        "activityId": ACTIVITY_ID,
+        "arguments": {
+            "rvtFile": {
+                "url": download_url,
+                "verb": "get",
+            },
+            "result": {
+                "url": output_url,
+                "verb": "put",
+            },
+        },
+    }
+    resp = requests.post(f"{DA_URL}/workitems", headers=dah(token), json=payload)
+    resp.raise_for_status()
+    return resp.json()["id"]
+
+
+def poll_workitem(token: str, wi_id: str, log=print) -> dict:
+    """Poll inntil WorkItem er ferdig. Returnerer WorkItem-status-dict."""
+    deadline = time.time() + MAX_WAIT
+    while time.time() < deadline:
+        time.sleep(POLL_EVERY)
+        resp = requests.get(f"{DA_URL}/workitems/{wi_id}", headers=dah(token))
+        resp.raise_for_status()
+        wi = resp.json()
+        status = wi.get("status", "")
+        log(f"  DA4R status: {status}")
+        if status in ("success", "failed", "cancelled", "timedout"):
+            return wi
+    return {"status": "timeout", "id": wi_id}
+
+
+def hent_output_json(token: str, wi: dict) -> list:
+    """
+    Last ned output.json fra DA4R WorkItem-rapport.
+    Returnerer liste med rom-dicts.
+    """
+    if wi.get("status") != "success":
+        raise RuntimeError(f"WorkItem feilet med status: {wi.get('status')} — {wi.get('reportUrl', '')}")
+
+    report_url = wi.get("reportUrl", "")
+    if not report_url:
+        raise RuntimeError("Ingen reportUrl i WorkItem-svar")
+
+    # DA4R legger output.json som et vedlegg i rapporten
+    # Men output.json hentes via outputArguments
+    output_args = wi.get("outputArguments", {})
+    result_info = output_args.get("result", {})
+    result_url = result_info.get("url", "")
+
+    if result_url:
+        r = requests.get(result_url)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("rom", [])
+
+    raise RuntimeError("Fant ikke output.json URL i WorkItem-svar")
+
+
+# ---------------------------------------------------------------------------
+# Hovedfunksjon: ekstraher rom fra én modell
+# ---------------------------------------------------------------------------
+
+def ekstraher_rom_fra_modell(project_id: str, item_id: str, model_name: str, log=print) -> list:
+    """
+    Kjør DA4R-ekstraksjon for én Revit-modell.
+    Returnerer liste med rom-dicts (samme format som output.json fra C#-addinnen).
+    """
+    log(f"  Henter token (code:all)...")
+    token = get_da_token()
+
+    log(f"  Henter signert nedlastings-URL for '{model_name}'...")
+    try:
+        download_url = get_signed_download_url(token, project_id, item_id)
+    except Exception as e:
+        raise RuntimeError(f"Kunne ikke hente nedlastings-URL: {e}")
+
+    # Opprett en midlertidig OSS-bucket for output
+    bucket_key = f"fef-da4r-output-{int(time.time())}"
+    object_name = f"{item_id.replace(':', '_').replace('/', '_')}_output.json"
+
+    log(f"  Oppretter OSS-bucket for output...")
+    try:
+        bucket_resp = requests.post(
+            f"{BASE_URL}/oss/v2/buckets",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"bucketKey": bucket_key, "policyKey": "transient"},
+        )
+        # 409 = finnes allerede, OK
+        if bucket_resp.status_code not in (200, 409):
+            bucket_resp.raise_for_status()
+
+        # Generer signert PUT-URL for output
+        sign_put_resp = requests.post(
+            f"{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_name}/signeds3upload",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"minutesExpiration": 60},
+        )
+        sign_put_resp.raise_for_status()
+        upload_url = sign_put_resp.json()["urls"][0]
+        upload_key = sign_put_resp.json()["uploadKey"]
+    except Exception as e:
+        raise RuntimeError(f"Kunne ikke opprette OSS-bucket: {e}")
+
+    log(f"  Sender WorkItem til DA4R...")
+    wi_id = submit_workitem_with_output(token, download_url, upload_url)
+
+    log(f"  Venter på DA4R (kan ta 2-5 min)...")
+    wi = poll_workitem(token, wi_id, log=log)
+
+    if wi.get("status") != "success":
+        report_url = wi.get("reportUrl", "")
+        log(f"  WorkItem feilet! Rapport: {report_url}")
+        if report_url:
+            try:
+                r = requests.get(report_url)
+                log(f"  Feilrapport (siste 500 tegn): {r.text[-500:]}")
+            except Exception:
+                pass
+        raise RuntimeError(f"DA4R WorkItem feilet: {wi.get('status')}")
+
+    log(f"  Laster ned output.json...")
+    try:
+        # Fullfør signert upload (nødvendig for å gjøre objektet tilgjengelig)
+        requests.post(
+            f"{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_name}/signeds3upload",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"uploadKey": upload_key},
+        )
+
+        # Hent signert GET-URL
+        get_sign_resp = requests.post(
+            f"{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_name}/signeds3download",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"minutesExpiration": 10},
+        )
+        get_sign_resp.raise_for_status()
+        get_url = get_sign_resp.json()["url"]
+
+        output_resp = requests.get(get_url)
+        output_resp.raise_for_status()
+        data = output_resp.json()
+        rom_liste = data.get("rom", [])
+        log(f"  Fant {len(rom_liste)} rom i '{model_name}'")
+        return rom_liste
+    except Exception as e:
+        raise RuntimeError(f"Kunne ikke laste ned output: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Kjøring fra kommandolinje (test)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Test DA4R-ekstraksjon")
+    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--item-id", required=True)
+    parser.add_argument("--name", default="TestModell.rvt")
+    args = parser.parse_args()
+
+    rom = ekstraher_rom_fra_modell(args.project_id, args.item_id, args.name)
+    print(json.dumps(rom, ensure_ascii=False, indent=2))
