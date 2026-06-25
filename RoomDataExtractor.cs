@@ -8,9 +8,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
-[assembly: Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
-[assembly: Autodesk.Revit.Attributes.Regeneration(Autodesk.Revit.Attributes.RegenerationOption.Manual)]
-
 namespace RoomDataExtractor
 {
     public class ExtractRoomsApp : IExternalDBApplication
