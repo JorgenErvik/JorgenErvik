@@ -15,7 +15,7 @@ jobs:
           dotnet-version: '4.8.x'
 
       - name: Build RoomDataExtractor
-        run: dotnet build fef-aps/da4r/addin/RoomDataExtractor.csproj -c Release
+        run: dotnet build RoomDataExtractor.csproj -c Release
         shell: pwsh
 
       - name: Upload DLL artifact
@@ -23,6 +23,6 @@ jobs:
         with:
           name: RoomDataExtractor-dll
           path: |
-            fef-aps/da4r/addin/bin/Release/net48/RoomDataExtractor.dll
-            fef-aps/da4r/addin/bin/Release/net48/Newtonsoft.Json.dll
+            bin/Release/net48/RoomDataExtractor.dll
+            bin/Release/net48/Newtonsoft.Json.dll
           retention-days: 30
