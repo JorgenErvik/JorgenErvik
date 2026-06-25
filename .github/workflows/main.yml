@@ -23,6 +23,6 @@ jobs:
         with:
           name: RoomDataExtractor-dll
           path: |
-            bin/Release/net48/RoomDataExtractor.dll
-            bin/Release/net48/Newtonsoft.Json.dll
+            bin/Release/net8.0-windows/RoomDataExtractor.dll
+            bin/Release/net8.0-windows/Newtonsoft.Json.dll
           retention-days: 30
