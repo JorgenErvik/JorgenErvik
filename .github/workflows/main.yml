@@ -22,7 +22,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RoomDataExtractor-dll
-          path: |
-            bin/Release/net8.0-windows/RoomDataExtractor.dll
-            bin/Release/net8.0-windows/Newtonsoft.Json.dll
+          path: bin/Release/net8.0-windows/
           retention-days: 30
