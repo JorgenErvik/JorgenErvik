@@ -9,15 +9,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Restore NuGet packages
-        run: nuget restore RoomDataExtractor.csproj
-        shell: pwsh
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
 
       - name: Build RoomDataExtractor
-        run: msbuild RoomDataExtractor.csproj /p:Configuration=Release /p:Platform=x64
+        run: dotnet build RoomDataExtractor.csproj -c Release
         shell: pwsh
 
       - name: Upload DLL artifact
@@ -25,6 +23,6 @@ jobs:
         with:
           name: RoomDataExtractor-dll
           path: |
-            bin/x64/Release/RoomDataExtractor.dll
-            bin/x64/Release/Newtonsoft.Json.dll
+            bin/Release/net48/RoomDataExtractor.dll
+            bin/Release/net48/Newtonsoft.Json.dll
           retention-days: 30
