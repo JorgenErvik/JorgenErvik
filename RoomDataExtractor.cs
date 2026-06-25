@@ -67,7 +67,7 @@ namespace RoomDataExtractor
             {
                 var dict = new Dictionary<string, object>
                 {
-                    ["Revit_ID"]  = room.Id.IntegerValue,
+                    ["Revit_ID"]    = room.Id.Value,
                     ["Romnummer"] = room.Number ?? "",
                     ["Romnavn"]   = room.Name ?? "",
                     ["Etasje"]    = room.Level?.Name ?? "",
